@@ -1,5 +1,6 @@
 package com.e3dd.skywardstrike;
 
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
@@ -16,19 +17,22 @@ import java.util.UUID;
 @Mod.EventBusSubscriber(modid = SkywardStrikeMod.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class ModEvents {
 
-    private static final Map<UUID, Long> COOLDOWNS = new HashMap<>();
-    private static final Map<UUID, Boolean> WAS_JUMPING = new HashMap<>();
-    private static final Map<UUID, Boolean> JUMP_STARTED_ON_GROUND = new HashMap<>();
-    private static final Map<UUID, Long> LAST_GROUND_JUMP_TIME = new HashMap<>();
+    // Separate maps for Client and Server to avoid race conditions in Single Player
+    private static final Map<UUID, Long> SERVER_COOLDOWNS = new HashMap<>();
+    private static final Map<UUID, Boolean> SERVER_WAS_JUMPING = new HashMap<>();
+    private static final Map<UUID, Long> SERVER_LAST_JUMP_RELEASE_TIME = new HashMap<>();
+
+    private static final Map<UUID, Long> CLIENT_COOLDOWNS = new HashMap<>();
+    private static final Map<UUID, Boolean> CLIENT_WAS_JUMPING = new HashMap<>();
+    private static final Map<UUID, Long> CLIENT_LAST_JUMP_RELEASE_TIME = new HashMap<>();
     
     private static final int COOLDOWN_TICKS = 100; // 5 seconds
-    private static final int DOUBLE_JUMP_WINDOW_TICKS = 25; // ~1.25 seconds window
+    private static final int DOUBLE_JUMP_WINDOW_TICKS = 10; // 0.5 seconds window
 
     private static Field jumpingField;
 
     static {
         try {
-            // Access the "jumping" field via reflection to detect input state
             jumpingField = LivingEntity.class.getDeclaredField("jumping");
             jumpingField.setAccessible(true);
         } catch (Exception e) {
@@ -42,7 +46,28 @@ public class ModEvents {
 
         Player player = event.player;
         UUID playerId = player.getUUID();
+        boolean isClient = player.level().isClientSide();
         long currentTime = player.level().getGameTime();
+
+        // Select the correct maps for the current thread/side
+        Map<UUID, Long> cooldowns = isClient ? CLIENT_COOLDOWNS : SERVER_COOLDOWNS;
+        Map<UUID, Boolean> wasJumpingMap = isClient ? CLIENT_WAS_JUMPING : SERVER_WAS_JUMPING;
+        Map<UUID, Long> lastReleaseMap = isClient ? CLIENT_LAST_JUMP_RELEASE_TIME : SERVER_LAST_JUMP_RELEASE_TIME;
+
+        // Check for Cooldown Expiry Notification (Client Only for Chat)
+        if (isClient && cooldowns.containsKey(playerId)) {
+            long cooldownEnd = cooldowns.get(playerId);
+            if (currentTime >= cooldownEnd) {
+                player.sendSystemMessage(Component.literal("§aSkyward Strike Ready!"));
+                cooldowns.remove(playerId);
+            }
+        }
+        // Cleanup Server Cooldowns silently
+        if (!isClient && cooldowns.containsKey(playerId)) {
+            if (currentTime >= cooldowns.get(playerId)) {
+                cooldowns.remove(playerId);
+            }
+        }
 
         // 1. Detect Input (Spacebar/Jump)
         boolean isJumping = false;
@@ -55,51 +80,46 @@ public class ModEvents {
         }
 
         // Get previous input state
-        boolean wasJumping = WAS_JUMPING.getOrDefault(playerId, false);
-        WAS_JUMPING.put(playerId, isJumping);
+        boolean wasJumping = wasJumpingMap.getOrDefault(playerId, false);
+        wasJumpingMap.put(playerId, isJumping);
 
         // 2. Logic: Handle Jump Inputs
 
         // RISING EDGE: Player just pressed the jump key
         if (isJumping && !wasJumping) {
-            boolean onGround = player.onGround();
-            JUMP_STARTED_ON_GROUND.put(playerId, onGround);
-
-            // If the player is in the air, check if this is a valid Second Jump
-            if (!onGround) {
-                 Long lastGroundJumpTime = LAST_GROUND_JUMP_TIME.get(playerId);
-                 
-                 // Check if we have a recent ground jump completion
-                 if (lastGroundJumpTime != null && (currentTime - lastGroundJumpTime) <= DOUBLE_JUMP_WINDOW_TICKS) {
-                     
-                     if (player.isCrouching()) {
+            
+            // Check if we have a recent jump release
+            Long lastJumpReleaseTime = lastReleaseMap.get(playerId);
+            
+            if (lastJumpReleaseTime != null) {
+                long gap = currentTime - lastJumpReleaseTime;
+                
+                // Must be within the window (0.5s)
+                if (gap <= DOUBLE_JUMP_WINDOW_TICKS) {
+                    
+                    if (player.isCrouching()) {
                         int enchantLevel = EnchantmentHelper.getEnchantmentLevel(ModEnchantments.SKYWARD_STRIKE.get(), player);
                         if (enchantLevel > 0) {
-                            if (currentTime >= COOLDOWNS.getOrDefault(playerId, 0L)) {
+                            if (!cooldowns.containsKey(playerId)) {
                                 // PERFORM LAUNCH
                                 double verticalBoost = 1.0 + (0.5 * enchantLevel);
                                 Vec3 currentMotion = player.getDeltaMovement();
                                 player.setDeltaMovement(currentMotion.x, verticalBoost, currentMotion.z);
                                 player.hurtMarked = true;
 
-                                COOLDOWNS.put(playerId, currentTime + COOLDOWN_TICKS);
-                                LAST_GROUND_JUMP_TIME.remove(playerId); // Consume the charge
+                                cooldowns.put(playerId, currentTime + COOLDOWN_TICKS);
+                                lastReleaseMap.remove(playerId); // Consume the charge
                             }
                         }
-                     }
-                 }
+                    }
+                }
             }
         }
 
         // FALLING EDGE: Player just released the jump key
         if (!isJumping && wasJumping) {
-            // Check if the jump that just finished started on the ground
-            boolean startedOnGround = JUMP_STARTED_ON_GROUND.getOrDefault(playerId, false);
-            
-            if (startedOnGround) {
-                // Register the completion of a ground jump
-                LAST_GROUND_JUMP_TIME.put(playerId, currentTime);
-            }
+            // Register the completion of a jump press
+            lastReleaseMap.put(playerId, currentTime);
         }
     }
 }
