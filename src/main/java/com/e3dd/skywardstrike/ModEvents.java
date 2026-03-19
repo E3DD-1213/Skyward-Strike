@@ -1,7 +1,10 @@
 package com.e3dd.skywardstrike;
 
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
@@ -9,6 +12,9 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.client.event.RenderGuiOverlayEvent;
+import net.minecraftforge.client.gui.overlay.VanillaGuiOverlay;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
@@ -21,20 +27,23 @@ import java.util.UUID;
 @Mod.EventBusSubscriber(modid = SkywardStrikeMod.MODID, bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class ModEvents {
 
-    // Separate maps for Client and Server to avoid race conditions in Single Player
+    // Separate maps for Client and Server
     private static final Map<UUID, Long> SERVER_COOLDOWNS = new HashMap<>();
     private static final Map<UUID, Boolean> SERVER_WAS_JUMPING = new HashMap<>();
     private static final Map<UUID, Long> SERVER_LAST_JUMP_RELEASE_TIME = new HashMap<>();
     private static final Map<UUID, Integer> SERVER_LAUNCH_TICKS = new HashMap<>();
+    private static final Map<UUID, Integer> SERVER_CROUCH_TIME = new HashMap<>();
 
     private static final Map<UUID, Long> CLIENT_COOLDOWNS = new HashMap<>();
     private static final Map<UUID, Boolean> CLIENT_WAS_JUMPING = new HashMap<>();
     private static final Map<UUID, Long> CLIENT_LAST_JUMP_RELEASE_TIME = new HashMap<>();
     private static final Map<UUID, Integer> CLIENT_LAUNCH_TICKS = new HashMap<>();
+    private static final Map<UUID, Integer> CLIENT_CROUCH_TIME = new HashMap<>();
     
     private static final int COOLDOWN_TICKS = 100; // 5 seconds
     private static final int DOUBLE_JUMP_WINDOW_TICKS = 10; // 0.5 seconds window
     private static final int LAUNCH_ANIMATION_DURATION = 30; // 1.5 seconds of particles
+    private static final int REQUIRED_CROUCH_TIME = 40; // 2 seconds (20 ticks/sec * 2)
 
     private static Field jumpingField;
 
@@ -61,42 +70,53 @@ public class ModEvents {
         Map<UUID, Boolean> wasJumpingMap = isClient ? CLIENT_WAS_JUMPING : SERVER_WAS_JUMPING;
         Map<UUID, Long> lastReleaseMap = isClient ? CLIENT_LAST_JUMP_RELEASE_TIME : SERVER_LAST_JUMP_RELEASE_TIME;
         Map<UUID, Integer> launchTicksMap = isClient ? CLIENT_LAUNCH_TICKS : SERVER_LAUNCH_TICKS;
+        Map<UUID, Integer> crouchTimeMap = isClient ? CLIENT_CROUCH_TIME : SERVER_CROUCH_TIME;
+
+        // --- CROUCH CHARGING LOGIC ---
+        boolean isCrouching = player.isCrouching();
+        int currentCrouchTime = crouchTimeMap.getOrDefault(playerId, 0);
+
+        if (isCrouching) {
+            // Check if player has enchantment
+            int enchantLevel = EnchantmentHelper.getEnchantmentLevel(ModEnchantments.SKYWARD_STRIKE.get(), player);
+            if (enchantLevel > 0) {
+                // Increment crouch time up to max
+                if (currentCrouchTime < REQUIRED_CROUCH_TIME) {
+                    currentCrouchTime++;
+                }
+            } else {
+                currentCrouchTime = 0;
+            }
+        } else {
+            // Reset if not crouching
+            currentCrouchTime = 0;
+        }
+        crouchTimeMap.put(playerId, currentCrouchTime);
+        // -----------------------------
 
         // --- CONTINUOUS PARTICLE ANIMATION ---
         if (launchTicksMap.containsKey(playerId)) {
             int ticksLeft = launchTicksMap.get(playerId);
             if (ticksLeft > 0) {
-                // Determine animation progress
                 int ticksPassed = LAUNCH_ANIMATION_DURATION - ticksLeft;
-                
-                // Radius: Moved out slightly from 0.5 -> 0.75
                 double baseRadius = 0.75; 
 
                 if (isClient) {
-                    // Client Side Particles
                     int particlesPerTick = 4;
                     for (int i = 0; i < particlesPerTick; i++) {
-                        // Spiral Angle increases with time
                         double angle = (ticksPassed * 0.5) + (i * Math.PI * 2.0 / particlesPerTick);
-                        
                         double radiusRandomness = (Math.random() - 0.5) * 0.2;
                         double radius = baseRadius + radiusRandomness;
-
                         double offsetX = Math.cos(angle) * radius;
                         double offsetZ = Math.sin(angle) * radius;
-                        
-                        // Spawn at player's current height, slightly distributed
                         double heightRandomness = (Math.random() - 0.5) * 0.5;
                         
                         player.level().addParticle(ParticleTypes.HAPPY_VILLAGER, 
                                 player.getX() + offsetX, player.getY() + 0.5 + heightRandomness, player.getZ() + offsetZ, 
-                                0, 0.05, 0); // Mild upward drift
+                                0, 0.05, 0);
                     }
                 } else {
-                    // Server Side Particles (for others to see)
                     ServerLevel serverLevel = (ServerLevel) player.level();
-                    // Send fewer particles to save bandwidth, relying on client interpolation mostly
-                    // But we want them to see the spiral too
                     double angle = ticksPassed * 0.5;
                     double radius = baseRadius;
                     double offsetX = Math.cos(angle) * radius;
@@ -106,7 +126,6 @@ public class ModEvents {
                             player.getX() + offsetX, player.getY() + 0.5, player.getZ() + offsetZ, 
                             2, 0.1, 0.2, 0.1, 0.05);
                 }
-
                 launchTicksMap.put(playerId, ticksLeft - 1);
             } else {
                 launchTicksMap.remove(playerId);
@@ -114,13 +133,14 @@ public class ModEvents {
         }
         // -------------------------------------
 
-
         // Check for Cooldown Expiry Notification (Client Only for Chat)
         if (isClient && cooldowns.containsKey(playerId)) {
             long cooldownEnd = cooldowns.get(playerId);
             if (currentTime >= cooldownEnd) {
-                player.sendSystemMessage(Component.literal("§aSkyward Strike Ready!"));
-                cooldowns.remove(playerId);
+                 if (currentTime == cooldownEnd) { // Check exact tick to send once
+                     player.sendSystemMessage(Component.literal("§aSkyward Strike Ready!"));
+                 }
+                 cooldowns.remove(playerId);
             }
         }
         // Cleanup Server Cooldowns silently
@@ -158,7 +178,11 @@ public class ModEvents {
                 // Must be within the window (0.5s)
                 if (gap <= DOUBLE_JUMP_WINDOW_TICKS) {
                     
-                    if (player.isCrouching()) {
+                    // Check Crouch Charge
+                    int charge = crouchTimeMap.getOrDefault(playerId, 0);
+
+                    // Must be fully charged (2 seconds)
+                    if (charge >= REQUIRED_CROUCH_TIME) {
                         int enchantLevel = EnchantmentHelper.getEnchantmentLevel(ModEnchantments.SKYWARD_STRIKE.get(), player);
                         if (enchantLevel > 0) {
                             if (!cooldowns.containsKey(playerId)) {
@@ -173,10 +197,9 @@ public class ModEvents {
                                     player.level().playSound(player, player.getX(), player.getY(), player.getZ(), 
                                             SoundEvents.PHANTOM_FLAP, SoundSource.PLAYERS, 2.0f, 1.0f);
 
-                                    // Ground Burst (CLOUD)
                                     for (int i = 0; i < 20; i++) {
                                         double angle = i * Math.PI * 2.0 / 20.0;
-                                        double radius = 0.6 + (Math.random() * 0.3); // Radius ~0.75 +/- variance
+                                        double radius = 0.6 + (Math.random() * 0.3);
                                         double offsetX = Math.cos(angle) * radius;
                                         double offsetZ = Math.sin(angle) * radius;
                                         
@@ -202,9 +225,12 @@ public class ModEvents {
 
                                 // Start Continuous Animation
                                 launchTicksMap.put(playerId, LAUNCH_ANIMATION_DURATION);
+                                
+                                // Reset Charge
+                                crouchTimeMap.put(playerId, 0);
 
                                 cooldowns.put(playerId, currentTime + COOLDOWN_TICKS);
-                                lastReleaseMap.remove(playerId); // Consume the charge
+                                lastReleaseMap.remove(playerId); 
                             }
                         }
                     }
@@ -214,8 +240,50 @@ public class ModEvents {
 
         // FALLING EDGE: Player just released the jump key
         if (!isJumping && wasJumping) {
-            // Register the completion of a jump press
             lastReleaseMap.put(playerId, currentTime);
+        }
+    }
+
+    // --- GUI RENDERING (Client Only) ---
+    @SubscribeEvent
+    public static void onRenderGui(RenderGuiOverlayEvent.Post event) {
+        if (event.getOverlay() != VanillaGuiOverlay.HOTBAR.type()) return;
+        
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null) return;
+        
+        UUID playerId = mc.player.getUUID();
+        int charge = CLIENT_CROUCH_TIME.getOrDefault(playerId, 0);
+
+        if (charge > 0) {
+            GuiGraphics graphics = event.getGuiGraphics();
+            int width = event.getWindow().getGuiScaledWidth();
+            int height = event.getWindow().getGuiScaledHeight();
+            
+            int barHeight = 18; 
+            int barWidth = 6; 
+            int padding = 3;
+            int x = (width / 2) - 91 - padding - barWidth; 
+            int y = (height - 22) + 2;
+
+            // Border (1px transparent black)
+            int borderColor = 0x80000000;
+            graphics.fill(x - 1, y - 1, x + barWidth + 1, y, borderColor); // Top
+            graphics.fill(x - 1, y + barHeight, x + barWidth + 1, y + barHeight + 1, borderColor); // Bottom
+            graphics.fill(x - 1, y, x, y + barHeight, borderColor); // Left
+            graphics.fill(x + barWidth, y, x + barWidth + 1, y + barHeight, borderColor); // Right
+
+            // Background (Gray)
+            graphics.fill(x, y, x + barWidth, y + barHeight, 0x80000000);
+
+            // Progress (Green)
+            float progress = (float) charge / REQUIRED_CROUCH_TIME;
+            int progressHeight = (int) (barHeight * progress);
+            int yStart = y + barHeight - progressHeight;
+            
+            // Color is constant green
+            int color = 0xFF00AA00;
+            graphics.fill(x, yStart, x + barWidth, y + barHeight, color);
         }
     }
 }
