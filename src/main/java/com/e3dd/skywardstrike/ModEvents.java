@@ -183,54 +183,57 @@ public class ModEvents {
 
                     // Must be fully charged (2 seconds)
                     if (charge >= REQUIRED_CROUCH_TIME) {
-                        int enchantLevel = EnchantmentHelper.getEnchantmentLevel(ModEnchantments.SKYWARD_STRIKE.get(), player);
-                        if (enchantLevel > 0) {
-                            if (!cooldowns.containsKey(playerId)) {
-                                // PERFORM LAUNCH
-                                double verticalBoost = 1.0 + (0.5 * enchantLevel);
-                                Vec3 currentMotion = player.getDeltaMovement();
-                                player.setDeltaMovement(currentMotion.x, verticalBoost, currentMotion.z);
-                                player.hurtMarked = true;
+                        // Require looking straight down (> 60 degrees) to differentiate from other mods
+                        if (player.getXRot() > 60.0f) {
+                            int enchantLevel = EnchantmentHelper.getEnchantmentLevel(ModEnchantments.SKYWARD_STRIKE.get(), player);
+                            if (enchantLevel > 0) {
+                                if (!cooldowns.containsKey(playerId)) {
+                                    // PERFORM LAUNCH
+                                    double verticalBoost = 1.0 + (0.5 * enchantLevel);
+                                    Vec3 currentMotion = player.getDeltaMovement();
+                                    player.setDeltaMovement(currentMotion.x, verticalBoost, currentMotion.z);
+                                    player.hurtMarked = true;
 
-                                // --- INITIAL BURST VISUALS & SOUND ---
-                                if (isClient) {
-                                    player.level().playSound(player, player.getX(), player.getY(), player.getZ(), 
-                                            SoundEvents.PHANTOM_FLAP, SoundSource.PLAYERS, 2.0f, 1.0f);
+                                    // --- INITIAL BURST VISUALS & SOUND ---
+                                    if (isClient) {
+                                        player.level().playSound(player, player.getX(), player.getY(), player.getZ(), 
+                                                SoundEvents.PHANTOM_FLAP, SoundSource.PLAYERS, 2.0f, 1.0f);
 
-                                    for (int i = 0; i < 20; i++) {
-                                        double angle = i * Math.PI * 2.0 / 20.0;
-                                        double radius = 0.6 + (Math.random() * 0.3);
-                                        double offsetX = Math.cos(angle) * radius;
-                                        double offsetZ = Math.sin(angle) * radius;
-                                        
-                                        player.level().addParticle(ParticleTypes.CLOUD, 
-                                                player.getX() + offsetX, player.getY(), player.getZ() + offsetZ, 
-                                                0, 0.05, 0);
-                                        
-                                        if (i % 2 == 0) {
-                                            player.level().addParticle(ParticleTypes.EXPLOSION, 
-                                                player.getX() + (Math.random() * 0.2 - 0.1), player.getY(), player.getZ() + (Math.random() * 0.2 - 0.1), 
-                                                0, 0, 0);
+                                        for (int i = 0; i < 20; i++) {
+                                            double angle = i * Math.PI * 2.0 / 20.0;
+                                            double radius = 0.6 + (Math.random() * 0.3);
+                                            double offsetX = Math.cos(angle) * radius;
+                                            double offsetZ = Math.sin(angle) * radius;
+                                            
+                                            player.level().addParticle(ParticleTypes.CLOUD, 
+                                                    player.getX() + offsetX, player.getY(), player.getZ() + offsetZ, 
+                                                    0, 0.05, 0);
+                                            
+                                            if (i % 2 == 0) {
+                                                player.level().addParticle(ParticleTypes.EXPLOSION, 
+                                                    player.getX() + (Math.random() * 0.2 - 0.1), player.getY(), player.getZ() + (Math.random() * 0.2 - 0.1), 
+                                                    0, 0, 0);
+                                            }
                                         }
+                                    } else {
+                                        ServerLevel serverLevel = (ServerLevel) player.level();
+                                        serverLevel.playSound(null, player.getX(), player.getY(), player.getZ(), 
+                                                SoundEvents.PHANTOM_FLAP, SoundSource.PLAYERS, 2.0f, 1.0f);
+                                        
+                                        serverLevel.sendParticles(ParticleTypes.CLOUD, player.getX(), player.getY(), player.getZ(), 20, 0.7, 0.1, 0.7, 0.1);
+                                        serverLevel.sendParticles(ParticleTypes.EXPLOSION, player.getX(), player.getY(), player.getZ(), 5, 0.2, 0.1, 0.2, 0.0);
                                     }
-                                } else {
-                                    ServerLevel serverLevel = (ServerLevel) player.level();
-                                    serverLevel.playSound(null, player.getX(), player.getY(), player.getZ(), 
-                                            SoundEvents.PHANTOM_FLAP, SoundSource.PLAYERS, 2.0f, 1.0f);
+                                    // -----------------------
+
+                                    // Start Continuous Animation
+                                    launchTicksMap.put(playerId, LAUNCH_ANIMATION_DURATION);
                                     
-                                    serverLevel.sendParticles(ParticleTypes.CLOUD, player.getX(), player.getY(), player.getZ(), 20, 0.7, 0.1, 0.7, 0.1);
-                                    serverLevel.sendParticles(ParticleTypes.EXPLOSION, player.getX(), player.getY(), player.getZ(), 5, 0.2, 0.1, 0.2, 0.0);
+                                    // Reset Charge
+                                    crouchTimeMap.put(playerId, 0);
+
+                                    cooldowns.put(playerId, currentTime + COOLDOWN_TICKS);
+                                    lastReleaseMap.remove(playerId); 
                                 }
-                                // -----------------------
-
-                                // Start Continuous Animation
-                                launchTicksMap.put(playerId, LAUNCH_ANIMATION_DURATION);
-                                
-                                // Reset Charge
-                                crouchTimeMap.put(playerId, 0);
-
-                                cooldowns.put(playerId, currentTime + COOLDOWN_TICKS);
-                                lastReleaseMap.remove(playerId); 
                             }
                         }
                     }
